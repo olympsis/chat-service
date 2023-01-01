@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-svc
+  annotations:
+    networking.gke.io/load-balancer-type: "Internal"
+    networking.gke.io/internal-load-balancer-allow-global-access: "true"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  selector:
+    app: olympsis-chat
+  ports:
+  - name: tcp-port
+    protocol: TCP
+    port: 80
+    targetPort: 7011
