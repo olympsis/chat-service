@@ -53,11 +53,8 @@ func main() {
 
 	// server config
 	s := &http.Server{
-		Addr:         `:` + port, // pull from env
-		Handler:      r,
-		IdleTimeout:  30 * time.Second,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:    `:` + port, // pull from env
+		Handler: r,
 	}
 
 	// start server
