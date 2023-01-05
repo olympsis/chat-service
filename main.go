@@ -23,12 +23,31 @@ func main() {
 	service := chat.NewChatService(l, r)
 
 	// connecting to database
-	service.InitiateClient()
+	res, err := service.ConnectToDatabase()
+
+	// quit on err
+	if !res || err != nil {
+		os.Exit(1)
+	}
+
+	hub := chat.CreateHub()
+	service.ConnectToHub(hub)
 
 	r.Handle("/", service.WhoAmi()).Methods("GET")
 	r.Handle("/healthz", service.Healthz()).Methods("GET")
 
-	r.Handle("/v1/chat/token", service.GenerateToken()).Methods("POST")
+	// service subrouter
+	sr := r.PathPrefix("/v1").Subrouter()
+
+	sr.Use(service.Middleware)
+	sr.Handle("/chats", service.CreateRoom()).Methods("POST")
+	sr.Handle("/chats/{id}", service.GetRoom()).Methods("GET")
+	sr.Handle("/chats/club/{id}", service.GetRooms()).Methods("GET")
+	sr.Handle("/chats/{id}", service.UpdateRoom()).Methods("PUT")
+	sr.Handle("/chats/{id}", service.DeleteRoom()).Methods("DELETE")
+	sr.Handle("/chats/{id}/join", service.JoinRoom()).Methods("POST")
+	sr.Handle("/chats/{id}/leave", service.LeaveRoom()).Methods("DELETE")
+	sr.Handle("/chats/{id}/ws", service.Listen())
 
 	port := os.Getenv("PORT")
 
