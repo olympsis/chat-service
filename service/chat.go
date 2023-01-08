@@ -580,7 +580,7 @@ func (c *ChatService) SendNotification(r http.Request, t string, b string, tpc s
 		return false, err
 	}
 
-	req, err := http.NewRequest("POST", "http://pushnote.olympsis.internal:7010/v1/pushnote/topic", bytes.NewBuffer(data))
+	req, err := http.NewRequest("POST", "http://pushnote.olympsis.internal/v1/pushnote/topic", bytes.NewBuffer(data))
 	if err != nil {
 		c.log.Error(err.Error())
 		return false, err
@@ -616,7 +616,7 @@ func (c *ChatService) SubscribeToRoomNotifications(r http.Request, tpc string, t
 		return false, err
 	}
 
-	req, err := http.NewRequest("PUT", "http://pushnote.olympsis.internal:7010/v1/pushnote/topic", bytes.NewBuffer(data))
+	req, err := http.NewRequest("PUT", "http://pushnote.olympsis.internal/v1/pushnote/topic", bytes.NewBuffer(data))
 	if err != nil {
 		c.log.Error(err.Error())
 		return false, err
@@ -652,7 +652,7 @@ func (c *ChatService) UnsubscribeToRoomNotifications(r http.Request, tpc string,
 		return false, err
 	}
 
-	req, err := http.NewRequest("DELETE", "http://pushnote.olympsis.internal:7010/v1/pushnote/topic", bytes.NewBuffer(data))
+	req, err := http.NewRequest("DELETE", "http://pushnote.olympsis.internal/v1/pushnote/topic", bytes.NewBuffer(data))
 	if err != nil {
 		c.log.Error(err.Error())
 		return false, err
@@ -689,7 +689,7 @@ func (c *ChatService) FetchUser(r http.Request, user string) LookUpUser {
 	token := tokenSplit[1]
 	client := &http.Client{}
 
-	req, err := http.NewRequest("GET", "http://lookup.olympsis.internal:7006/v1/lookup/"+user, nil)
+	req, err := http.NewRequest("GET", "http://lookup.olympsis.internal/v1/lookup/"+user, nil)
 	if err != nil {
 		c.log.Error(err.Error())
 	}
