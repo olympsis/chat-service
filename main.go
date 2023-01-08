@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/http"
+	hub "olympsis-services/chat/controller"
 	chat "olympsis-services/chat/service"
 	"os"
 	"os/signal"
@@ -30,8 +31,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	hub := chat.CreateHub()
+	hub := hub.NewHub(l)
 	service.ConnectToHub(hub)
+
+	go hub.Run()
 
 	r.Handle("/", service.WhoAmi()).Methods("GET")
 	r.Handle("/healthz", service.Healthz()).Methods("GET")

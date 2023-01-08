@@ -28,9 +28,10 @@ build: dep ## Build the binary file
 
 docker:
 	docker build . -t $(SERVICE_NAME)
-
+	docker rmi $$(docker images -f "dangling=true" -q) --force
+	
 run:
-	docker run -p 7011:7011 $(SERVICE_NAME)
+	docker run --network d35064053a0f -p 7011:7011 $(SERVICE_NAME)
 
 clean: ## Remove previous build
 	rm -f $(PROJECT_NAME)

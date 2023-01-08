@@ -1,9 +1,11 @@
 package chat
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	hub "olympsis-services/chat/controller"
 	"os"
 	"strings"
 	"time"
@@ -23,45 +25,12 @@ type ChatService struct {
 	col *mongo.Collection
 	log *logrus.Logger
 	rtr *mux.Router
-	hub *Hub
+	hub *hub.Hub
 }
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-}
-
-// Client is a client that is connected to the server via a websocket.
-type Client struct {
-	UUID  string
-	Conn  *websocket.Conn
-	Group string
-}
-
-type Hub struct {
-	// The clients that are connected to the server.
-	Clients map[*Client]bool
-
-	// The groups that exist on the server.
-	Groups map[string]*Group
-
-	// The channel on which new clients are added to the hub.
-	Register chan *Client
-
-	// The channel on which clients are removed from the hub.
-	Unregister chan *Client
-
-	// The channel on which messages are broadcast to all clients.
-	Broadcast chan Message
-}
-
-type Group struct {
-	Name       string
-	Clients    []*Client
-	Broadcast  chan Message
-	Register   chan *Client
-	Unregister chan *Client
-	Log        *logrus.Logger
 }
 
 type Room struct {
@@ -70,7 +39,7 @@ type Room struct {
 	Name    string             `json:"name" bson:"name"`
 	Type    string             `json:"type" bson:"type"`
 	Members []Member           `json:"members" bson:"members"`
-	History []Message          `json:"history" bson:"history"`
+	History []hub.Message      `json:"history" bson:"history"`
 }
 
 type RoomsResponse struct {
@@ -82,14 +51,6 @@ type Member struct {
 	ID     primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
 	UUID   string             `json:"uuid" bson:"uuid"`
 	Status string             `json:"status" bson:"status"`
-}
-
-type Message struct {
-	ID        primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
-	From      string             `json:"from" bson:"from"`
-	Type      string             `json:"type" bson:"type"`
-	Body      string             `json:"body" bson:"body"`
-	Timestamp int64              `json:"timestamp" bson:"timestamp"`
 }
 
 func NewChatService(l *logrus.Logger, r *mux.Router) *ChatService {
@@ -119,60 +80,9 @@ func (c *ChatService) ConnectToDatabase() (bool, error) {
 	}
 }
 
-func CreateHub() *Hub {
-	return &Hub{
-		Clients:    make(map[*Client]bool),
-		Groups:     make(map[string]*Group),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
-		Broadcast:  make(chan Message),
-	}
-}
-
-func (c *ChatService) ConnectToHub(h *Hub) {
+func (c *ChatService) ConnectToHub(h *hub.Hub) {
 	c.hub = h
 	c.log.Info("Hub connection successful")
-}
-
-func (c *ChatService) StartHub() {
-	for {
-
-	}
-}
-
-// NewGroup creates a new group.
-func (c *ChatService) NewGroup(name string) *Group {
-	return &Group{
-		Name:       name,
-		Clients:    make([]*Client, 0),
-		Broadcast:  make(chan Message),
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
-		Log:        c.log,
-	}
-}
-
-func (g *Group) Run() {
-	for {
-		select {
-		case client := <-g.Register:
-			g.Clients = append(g.Clients, client)
-			g.Log.Info(client.UUID + " joined " + g.Name)
-		case client := <-g.Unregister:
-			for i, c := range g.Clients {
-				if c.UUID == client.UUID {
-					g.Clients = append(g.Clients[:i], g.Clients[i+1:]...)
-					g.Log.Info(client.UUID + " left " + g.Name)
-					break
-				}
-			}
-		case message := <-g.Broadcast:
-			g.Log.Info(message.ID.Hex() + " was sent")
-			for _, client := range g.Clients {
-				client.Conn.WriteJSON(message)
-			}
-		}
-	}
 }
 
 func (c *ChatService) GetRoom() http.HandlerFunc {
@@ -198,7 +108,7 @@ func (c *ChatService) GetRoom() http.HandlerFunc {
 			}
 		}
 		rw.Header().Set("Content-Type", "application/json")
-		rw.WriteHeader(http.StatusFound)
+		rw.WriteHeader(http.StatusOK)
 		json.NewEncoder(rw).Encode(room)
 	}
 }
@@ -285,7 +195,7 @@ func (c *ChatService) CreateRoom() http.HandlerFunc {
 			Name:    req.Name,
 			Type:    req.Type,
 			Members: []Member{member},
-			History: []Message{},
+			History: []hub.Message{},
 		}
 
 		// create auth user in database
@@ -295,6 +205,12 @@ func (c *ChatService) CreateRoom() http.HandlerFunc {
 			rw.WriteHeader(http.StatusBadRequest)
 			rw.Write([]byte(`{ "msg": " ` + err.Error() + `" }`))
 			return
+		}
+
+		usr := c.FetchUser(*r, req.Members[0].UUID)
+		ok, err := c.SubscribeToRoomNotifications(*r, room.ID.Hex(), []string{usr.DeviceToken})
+		if !ok || err != nil {
+			c.log.Error("Failed to subscribe user: " + req.Members[0].UUID + "to room topic. Room: " + room.ID.Hex())
 		}
 
 		rw.WriteHeader(http.StatusCreated)
@@ -378,7 +294,34 @@ func (c *ChatService) DeleteRoom() http.HandlerFunc {
 		oid, _ := primitive.ObjectIDFromHex(id)
 
 		filter := bson.D{primitive.E{Key: "_id", Value: oid}}
-		_, err := c.col.DeleteOne(context.TODO(), filter)
+
+		// we need to unregister users from topic before deleting room
+		var room Room
+
+		err := c.col.FindOne(context.TODO(), filter).Decode(&room)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				rw.Header().Set("Content-Type", "application/json")
+				rw.WriteHeader(http.StatusNotFound)
+				return
+			}
+		}
+
+		// fetch their device tokens
+		var tokens []string
+		for i := 0; i < len(room.Members); i++ {
+			usr := c.FetchUser(*r, room.Members[i].UUID)
+			tokens = append(tokens, usr.DeviceToken)
+		}
+
+		// unsubscribe users
+		ok, err := c.UnsubscribeToRoomNotifications(*r, room.ID.Hex(), tokens)
+		if !ok || err != nil {
+			c.log.Error("Failed to unsubscribe users from room topic. Room: " + id)
+		}
+
+		// delete room
+		_, err = c.col.DeleteOne(context.TODO(), filter)
 		if err != nil {
 			c.log.Debug(err.Error())
 		}
@@ -440,6 +383,13 @@ func (c *ChatService) JoinRoom() http.HandlerFunc {
 				return
 			}
 		}
+
+		usr := c.FetchUser(*r, uuid)
+		ok, err := c.SubscribeToRoomNotifications(*r, room.ID.Hex(), []string{usr.DeviceToken})
+		if !ok || err != nil {
+			c.log.Error("Failed to subscribe user: " + uuid + "to room topic. Room: " + room.ID.Hex())
+		}
+
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusCreated)
 		json.NewEncoder(rw).Encode(room)
@@ -483,6 +433,12 @@ func (c *ChatService) LeaveRoom() http.HandlerFunc {
 			c.log.Debug(err.Error())
 		}
 
+		usr := c.FetchUser(*r, uuid)
+		ok, err := c.UnsubscribeToRoomNotifications(*r, id, []string{usr.DeviceToken})
+		if !ok || err != nil {
+			c.log.Error("Failed to unsubscribe user: " + uuid + "from room topic. Room: " + id)
+		}
+
 		rw.Header().Set("Content-Type", "application/json")
 		rw.WriteHeader(http.StatusOK)
 		rw.Write([]byte(`OK`))
@@ -523,25 +479,15 @@ func (c *ChatService) Listen() http.HandlerFunc {
 		}
 
 		// create client
-		cl := &Client{
-			UUID:  uuid,
-			Conn:  conn,
-			Group: id,
+		cl := &hub.Client{
+			UUID: uuid,
+			Conn: conn,
+			Room: id,
 		}
 
-		// add client to group
-		// if group doesn't exist then create one and add it to the hub
-		group, ok := c.hub.Groups[cl.Group]
-		if !ok {
-			// Create a new group if it doesn't exist.
-			group = c.NewGroup(cl.Group)
-			c.hub.Groups[cl.Group] = group
-			go group.Run()
-		}
+		c.hub.Register <- cl
 
-		group.Register <- cl
-
-		var msg Message
+		var msg hub.Message
 		for {
 			// Read a message from the client.
 			err := conn.ReadJSON(&msg)
@@ -551,7 +497,7 @@ func (c *ChatService) Listen() http.HandlerFunc {
 			}
 
 			// add metadata to message
-			message := Message{
+			message := hub.Message{
 				ID:        primitive.NewObjectID(),
 				From:      msg.From,
 				Type:      msg.Type,
@@ -560,21 +506,39 @@ func (c *ChatService) Listen() http.HandlerFunc {
 			}
 
 			// store message
-			ok, err := c.StoreMessage(&message, group.Name)
+			ok, err := c.StoreMessage(&message, cl.Room)
 			if !ok {
 				c.log.Info(err)
 			}
 
+			usr := c.FetchUser(*r, msg.From)
+			fN := usr.FirstName + " " + usr.LastName
+
+			// fetch room name
+			oid, _ := primitive.ObjectIDFromHex(id)
+			var room Room
+
+			filter := bson.M{"_id": oid}
+			err = c.col.FindOne(context.TODO(), filter).Decode(&room)
+			if err != nil {
+				c.log.Error("Failed to fetch room name")
+			}
+			rN := room.Name
+			b := "Sent To " + rN
+
 			// Send the message to the group.
-			group.Broadcast <- message
+			c.hub.SendMessage(message, cl.Room)
+
+			// send notification
+			c.SendNotification(*r, fN, b, id)
 		}
 
 		// unregister if client disconnects
-		group.Unregister <- cl
+		c.hub.DisconnectClientFromRoom(cl, cl.Room)
 	}
 }
 
-func (c *ChatService) StoreMessage(message *Message, clubId string) (bool, error) {
+func (c *ChatService) StoreMessage(message *hub.Message, clubId string) (bool, error) {
 
 	oid, _ := primitive.ObjectIDFromHex(clubId)
 	filter := bson.M{"_id": oid}
@@ -587,6 +551,165 @@ func (c *ChatService) StoreMessage(message *Message, clubId string) (bool, error
 	}
 
 	return true, nil
+}
+
+// NOTIFICATIONS
+
+type NotificationRequest struct {
+	Tokens []string `json:"tokens,omitempty"`
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	Topic  string   `json:"topic"`
+}
+
+func (c *ChatService) SendNotification(r http.Request, t string, b string, tpc string) (bool, error) {
+	bearerToken := r.Header.Get("Authorization")
+	tokenSplit := strings.Split(bearerToken, "Bearer ")
+	token := tokenSplit[1]
+	client := &http.Client{}
+
+	request := NotificationRequest{
+		Title: t,
+		Body:  b,
+		Topic: tpc,
+	}
+
+	data, err := json.Marshal(request)
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	req, err := http.NewRequest("POST", "http://pushnote.olympsis.internal:7010/v1/pushnote/topic", bytes.NewBuffer(data))
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	defer resp.Body.Close()
+	return true, nil
+}
+
+func (c *ChatService) SubscribeToRoomNotifications(r http.Request, tpc string, tks []string) (bool, error) {
+	bearerToken := r.Header.Get("Authorization")
+	tokenSplit := strings.Split(bearerToken, "Bearer ")
+	token := tokenSplit[1]
+	client := &http.Client{}
+
+	request := NotificationRequest{
+		Topic:  tpc,
+		Tokens: tks,
+	}
+
+	data, err := json.Marshal(request)
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	req, err := http.NewRequest("PUT", "http://pushnote.olympsis.internal:7010/v1/pushnote/topic", bytes.NewBuffer(data))
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	defer resp.Body.Close()
+	return true, nil
+}
+
+func (c *ChatService) UnsubscribeToRoomNotifications(r http.Request, tpc string, tks []string) (bool, error) {
+	bearerToken := r.Header.Get("Authorization")
+	tokenSplit := strings.Split(bearerToken, "Bearer ")
+	token := tokenSplit[1]
+	client := &http.Client{}
+
+	request := NotificationRequest{
+		Topic:  tpc,
+		Tokens: tks,
+	}
+
+	data, err := json.Marshal(request)
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	req, err := http.NewRequest("DELETE", "http://pushnote.olympsis.internal:7010/v1/pushnote/topic", bytes.NewBuffer(data))
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		c.log.Error(err.Error())
+		return false, err
+	}
+
+	defer resp.Body.Close()
+	return true, nil
+}
+
+// USER LOOKUP
+
+/*
+Lookup User
+- contains identifiable user data that others can see
+*/
+type LookUpUser struct {
+	FirstName   string `json:"firstName" bson:"firstName"`
+	LastName    string `json:"lastName" bson:"lastName"`
+	DeviceToken string `json:"deviceToken,omitempty" bson:"deviceToken,omitempty"`
+}
+
+func (c *ChatService) FetchUser(r http.Request, user string) LookUpUser {
+	bearerToken := r.Header.Get("Authorization")
+	tokenSplit := strings.Split(bearerToken, "Bearer ")
+	token := tokenSplit[1]
+	client := &http.Client{}
+
+	req, err := http.NewRequest("GET", "http://lookup.olympsis.internal:7006/v1/lookup/"+user, nil)
+	if err != nil {
+		c.log.Error(err.Error())
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		c.log.Error(err.Error())
+	}
+
+	defer resp.Body.Close()
+
+	var lookup LookUpUser
+	err = json.NewDecoder(resp.Body).Decode(&lookup)
+	if err != nil {
+		c.log.Error(err.Error())
+	}
+	return lookup
 }
 
 /*

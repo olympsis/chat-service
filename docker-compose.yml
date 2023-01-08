@@ -1,0 +1,6 @@
+version: '3'
+services:
+  chat:
+    image: chat-service:latest
+    ports:
+     - "80:7011"
