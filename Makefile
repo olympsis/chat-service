@@ -1,3 +1,4 @@
+VERSION := v0.1.6
 PROJECT_NAME := chat
 SERVICE_NAME := chat-service
 PKG := "olympsis-services/$(PROJECT_NAME)"
@@ -32,6 +33,12 @@ docker:
 	
 run:
 	docker run --network d35064053a0f -p 7011:7011 $(SERVICE_NAME)
+
+git:
+	git add .
+	git tag $(VERSION)
+	git commit -m "added a new version. v0.1.6"
+	git push
 
 clean: ## Remove previous build
 	rm -f $(PROJECT_NAME)
