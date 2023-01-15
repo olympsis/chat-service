@@ -315,7 +315,7 @@ func (c *ChatService) DeleteRoom() http.HandlerFunc {
 		}
 
 		// unsubscribe users
-		ok, err := c.UnsubscribeToRoomNotifications(*r, room.ID.Hex(), tokens)
+		ok, err := c.UnsubscribeFromRoomNotifications(*r, room.ID.Hex(), tokens)
 		if !ok || err != nil {
 			c.log.Error("Failed to unsubscribe users from room topic. Room: " + id)
 		}
@@ -434,7 +434,7 @@ func (c *ChatService) LeaveRoom() http.HandlerFunc {
 		}
 
 		usr := c.FetchUser(*r, uuid)
-		ok, err := c.UnsubscribeToRoomNotifications(*r, id, []string{usr.DeviceToken})
+		ok, err := c.UnsubscribeFromRoomNotifications(*r, id, []string{usr.DeviceToken})
 		if !ok || err != nil {
 			c.log.Error("Failed to unsubscribe user: " + uuid + "from room topic. Room: " + id)
 		}
@@ -635,7 +635,7 @@ func (c *ChatService) SubscribeToRoomNotifications(r http.Request, tpc string, t
 	return true, nil
 }
 
-func (c *ChatService) UnsubscribeToRoomNotifications(r http.Request, tpc string, tks []string) (bool, error) {
+func (c *ChatService) UnsubscribeFromRoomNotifications(r http.Request, tpc string, tks []string) (bool, error) {
 	bearerToken := r.Header.Get("Authorization")
 	tokenSplit := strings.Split(bearerToken, "Bearer ")
 	token := tokenSplit[1]
